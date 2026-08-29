@@ -1,0 +1,16 @@
+# Local secrets and machine-specific environment
+.env
+secrets/*.txt
+
+# Downloaded models and runtime state
+models/*
+!models/.gitkeep
+data/*
+!data/.gitkeep
+
+# Database backups
+backups/
+backends/
+
+# Local Python environments
+**/venv/

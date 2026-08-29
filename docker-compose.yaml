@@ -1,0 +1,135 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: localai-postgres
+
+    env_file:
+      - .env
+
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/webui_postgres_password
+      - POSTGRES_DB=${POSTGRES_DB}
+      - LOCALAI_POSTGRES_USER=${LOCALAI_POSTGRES_USER}
+      - LOCALAI_POSTGRES_DB=${LOCALAI_POSTGRES_DB}
+      - LOCALAI_POSTGRES_PASSWORD_FILE=/run/secrets/localai_postgres_password
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-localai-db.sh:/docker-entrypoint-initdb.d/init-localai-db.sh:ro
+
+    secrets:
+      - webui_postgres_password
+      - localai_postgres_password
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+    restart: always
+
+  localai:
+    image: localai/localai:latest-gpu-nvidia-cuda-12
+    container_name: localai
+
+    entrypoint:
+      - /bin/sh
+      - -lc
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - ./models:/models
+      - localai-backends:/backends
+      - ./configuration:/configuration
+      - ./data:/data
+
+    environment:
+      - LOCALAI_AGENT_POOL_VECTOR_ENGINE=postgres
+      - LOCALAI_AGENT_POOL_EMBEDDING_MODEL=granite-embedding-107m-multilingual
+      - LOCALAI_AGENT_POOL_ENABLE_LOGS=true
+      - MODELS_PATH=/models
+      - BACKENDS_PATH=/backends
+      - LOCALAI_CONFIG_DIR=/configuration
+      - DATA_PATH=/data
+      - CONTEXT_SIZE=8192
+      - THREADS=8
+
+    command:
+      - |
+        if [ ! -x /backends/cuda12-llama-cpp/llama-cpp-grpc ]; then
+          /local-ai backends install cuda12-llama-cpp
+        fi;
+        LOCALAI_DB_PASSWORD="$(tr -d '\r\n' < /run/secrets/localai_postgres_password)";
+        export LOCALAI_AGENT_POOL_DATABASE_URL="postgresql://${LOCALAI_POSTGRES_USER}:$${LOCALAI_DB_PASSWORD}@postgres:5432/${LOCALAI_POSTGRES_DB}";
+        exec /entrypoint.sh
+
+    secrets:
+      - localai_postgres_password
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    restart: always
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+
+    env_file:
+      - .env
+
+    ports:
+      - "${WEBUI_PORT}:8080"
+
+    volumes:
+      - open-webui:/app/backend/data
+
+    environment:
+      - OPENAI_API_BASE_URL=http://localai:8080/v1
+      - OPENAI_API_KEY=sk-localai
+      - ENABLE_OLLAMA_API=false
+      - VECTOR_DB=${VECTOR_DB}
+      - CORS_ALLOW_ORIGIN=${WEBUI_CORS_ORIGIN}
+
+    command:
+      - bash
+      - -lc
+      - |
+        WEBUI_DB_PASSWORD="$(tr -d '\r\n' < /run/secrets/webui_postgres_password)";
+        export DATABASE_URL="postgresql://${POSTGRES_USER}:$${WEBUI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}";
+        exec bash start.sh
+
+    secrets:
+      - webui_postgres_password
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localai:
+        condition: service_started
+
+    restart: always
+
+volumes:
+  postgres-data:
+  open-webui:
+  localai-backends:
+
+secrets:
+  webui_postgres_password:
+    file: ./secrets/webui_postgres_password.txt
+  localai_postgres_password:
+    file: ./secrets/localai_postgres_password.txt
